@@ -1,19 +1,17 @@
-"""V1-MT Cortical Motion Processing Stage."""
+"""V1-MT Cortical Motion Processing Stage with Steerable Pyramid Subbands."""
 
 from .metric_v1_mt import V1MTColorVideoVDP
-from .mt import MTIntegration, MTNormalization, MTStage, compute_velocity_plane_weights
-from .v1 import V1FilterLayer, V1Normalization, V1Stage, synthesize_gabor_kernels
-from .v1_mt import V1MTModel
+from .mt import (
+    MTNormalization,
+    SteerableMTIntegration,
+    SteerableMTStage,
+    compute_steerable_velocity_plane_weights,
+)
 
 __all__ = [
-    "compute_velocity_plane_weights",
-    "MTIntegration",
+    "compute_steerable_velocity_plane_weights",
+    "SteerableMTIntegration",
     "MTNormalization",
-    "MTStage",
-    "synthesize_gabor_kernels",
-    "V1FilterLayer",
-    "V1Normalization",
-    "V1Stage",
-    "V1MTModel",
+    "SteerableMTStage",
     "V1MTColorVideoVDP",
 ]
