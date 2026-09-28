@@ -1,0 +1,35 @@
+[project]
+name = "simplercolorvideovdp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Jorgvt", email = "vila_tronik@hotmail.com" }
+]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=2.0.2",
+    "scipy>=1.13.1",
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.25,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "einops>=0.8.2",
+    "ffmpeg-python>=0.2.0",
+    "huggingface-hub>=1.8.0",
+    "imageio>=2.37.2",
+    "matplotlib>=3.9.4",
+    "pyexr>=0.5.0",
+    "pytest>=8.4.2",
+    "setuptools>=82.0.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]
+
