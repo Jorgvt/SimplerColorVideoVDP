@@ -1,39 +1,36 @@
-"""Tests for Unified Steerable-driven MT Cortical Motion Processing Stage."""
+"""Tests for Unified Steerable-driven MT Cortical Motion Processing Stage using the core library."""
 
 import math
 import pytest
 import torch
 
-from simplercolorvideovdp.temporal import apply_temporal_filtering
-from experiments.exp01_orientation_selective_pyramid.steerable_pyramid import SteerableWeberPyramid
-from experiments.exp02_v1_mt_motion_processing.metric_v1_mt import V1MTColorVideoVDP
-from experiments.exp02_v1_mt_motion_processing.mt import (
+from simplercolorvideovdp import (
     SteerableMTIntegration,
     SteerableMTStage,
+    SteerableWeberPyramid,
+    V1MTColorVideoVDP,
+    apply_temporal_filtering,
     compute_steerable_velocity_plane_weights,
 )
 
 
 def test_steerable_velocity_plane_weights():
     """Verifies that velocity plane weights peak when omega = v * rho * cos(theta_k - theta_mt)."""
-    scale_freqs = torch.tensor([1.5, 3.0])  # cpd
+    scale_freqs = torch.tensor([1.5, 3.0])
     orientations = torch.tensor([0.0, math.pi / 4, math.pi / 2, 3 * math.pi / 4])
-    temp_freqs = torch.tensor([0.0, 5.0])  # Hz
+    temp_freqs = torch.tensor([0.0, 5.0])
 
-    mt_dirs = torch.tensor([0.0])  # 0 deg (Rightward)
-    mt_speeds = torch.tensor([1.6667])  # 1.6667 deg/s -> at rho=3.0, dot_product = 1.6667 * 3.0 = 5.0 Hz (exact match for omega=5.0, theta=0!)
+    mt_dirs = torch.tensor([0.0])
+    mt_speeds = torch.tensor([1.6667])
 
     w = compute_steerable_velocity_plane_weights(
         scale_freqs, orientations, temp_freqs, mt_dirs, mt_speeds, sigma_p=0.5
     )
 
-    # Total V1 channels: 2 scales * 4 ori * 2 temp = 16 channels
     assert w.shape == (16, 1)
-
-    # The exact matching channel is: scale idx 1 (rho=3.0), ori idx 0 (theta=0), temp idx 1 (omega=5.0) -> flat idx: 1*4*2 + 0*2 + 1 = 9
+    # The exact matching channel: scale=3.0, ori=0, temp=5.0 -> flat idx 9
     assert w[9, 0].item() > 0.3
-    # Off-plane channel (omega=5.0, theta=pi/2, dot_product=0) should have near-zero weight
-    # scale idx 1 (rho=3.0), ori idx 2 (theta=pi/2), temp idx 1 (omega=5.0) -> flat idx: 1*4*2 + 2*2 + 1 = 13
+    # Off-plane channel: scale=3.0, ori=pi/2, temp=5.0 -> flat idx 13
     assert w[13, 0].item() < 1e-10
 
 
@@ -43,7 +40,7 @@ def test_steerable_mt_aperture_plaid():
     fps = 30.0
     ppd = 30.0
     sf = 1.5
-    speed = 5.0 / sf  # 3.33 deg/s -> matches 5.0 Hz temporal frequency
+    speed = 5.0 / sf
 
     ts = torch.linspace(0, (t_len - 1) / fps, t_len).view(1, 1, t_len, 1, 1)
     xs = torch.linspace(0, (w - 1) / ppd, w).view(1, 1, 1, 1, w)
@@ -57,7 +54,6 @@ def test_steerable_mt_aperture_plaid():
     th2 = -math.pi / 4.0
     comp2 = torch.cos(2.0 * math.pi * (sf * (xs * math.cos(th2) + ys * math.sin(th2)) - 5.0 * ts))
 
-    # Combined Type I Plaid: True global motion is along Horizontal axis (0 deg / 180 deg)
     plaid = 0.5 * (comp1 + comp2).repeat(1, 3, 1, 1, 1)
 
     # Temporal filtering
@@ -72,8 +68,7 @@ def test_steerable_mt_aperture_plaid():
     subbands = []
     for bb in range(pyr.num_levels):
         b_bb = b_bands[bb]
-        # Sustained Ach (ch 0) and Transient Ach (ch 3)
-        sust_ach = b_bb[:, 0:1, ...]  # (B, 1, T, K, H, W)
+        sust_ach = b_bb[:, 0:1, ...]
         trans_ach = b_bb[:, 3:4, ...]
         scale_sub = torch.cat([sust_ach, trans_ach], dim=1).permute(0, 3, 1, 2, 4, 5).reshape(1, -1, t_len, h, w)
         subbands.append(scale_sub)
@@ -93,12 +88,9 @@ def test_steerable_mt_aperture_plaid():
     )
 
     mt_norm = mt_stage(stacked_v1)
-    flow = mt_stage.decode_velocity_flow(mt_norm)
-
-    # Center frame average
     mt_mean = torch.mean(mt_norm[:, :, 3:-3], dim=(-3, -2, -1))[0]
 
-    # MT pattern response on horizontal motion axis (idx 0 and idx 4) is active
+    # MT pattern response on horizontal motion axis is active
     assert mt_norm.shape == (1, 8, t_len, h, w)
     assert mt_mean[0].item() > 0.05
     assert mt_mean[4].item() > 0.05
@@ -108,19 +100,15 @@ def test_unified_metric_end_to_end_and_differentiability():
     """Verifies that the unified V1MTColorVideoVDP evaluates video pairs and is differentiable."""
     metric = V1MTColorVideoVDP(ppd=30.0, fps=30.0)
 
-    # Video pair with 5 frames
     ref_vid = torch.rand((1, 3, 5, 32, 32), dtype=torch.float32)
     test_vid = (ref_vid + 0.05 * torch.randn_like(ref_vid)).clamp(0, 1).requires_grad_(True)
 
-    # Identical pair -> JOD == 10.0
     jod_identical = metric(ref_vid, ref_vid).item()
     assert pytest.approx(10.0, abs=1e-3) == jod_identical
 
-    # Distorted pair -> JOD < 10.0
     jod_dist = metric(test_vid, ref_vid).item()
     assert jod_dist < 10.0
 
-    # Differentiability
     loss = metric.loss(test_vid, ref_vid)
     loss.backward()
 

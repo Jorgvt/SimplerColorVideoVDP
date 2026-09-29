@@ -1,17 +1,10 @@
-"""Comparison Benchmark: Isotropic SimplerColorVideoVDP vs. OrientedColorVideoVDP.
-
-Evaluates:
-1. Parallel vs. Orthogonal Masking Sensitivity (Gratings Test)
-2. Directional Blur & Noise on Natural Patterns
-3. Execution Speed / Throughput Comparison
-"""
+"""Comparison Benchmark: Isotropic SimplerColorVideoVDP vs. OrientedColorVideoVDP."""
 
 import math
 import time
 import torch
 
-from simplercolorvideovdp.metric import ColorVideoVDP
-from experiments.exp01_orientation_selective_pyramid.metric_oriented import OrientedColorVideoVDP
+from simplercolorvideovdp import ColorVideoVDP, OrientedColorVideoVDP
 
 
 def run_grating_masking_experiment():

@@ -1,17 +1,14 @@
-"""Benchmark & Evaluation of Unified Steerable-MT Cortical Video Quality Metric.
-
-Evaluates:
-1. Speed & Throughput: Isotropic Baseline vs. Steerable vs. Unified Steerable-MT.
-2. Motion Distortion Sensitivity: Video Frame Judder & Temporal Noise.
-"""
+"""Benchmark & Evaluation of Unified Steerable-MT Cortical Video Quality Metric."""
 
 import math
 import time
 import torch
 
-from simplercolorvideovdp.metric import ColorVideoVDP
-from experiments.exp01_orientation_selective_pyramid.metric_oriented import OrientedColorVideoVDP
-from experiments.exp02_v1_mt_motion_processing.metric_v1_mt import V1MTColorVideoVDP
+from simplercolorvideovdp import (
+    ColorVideoVDP,
+    OrientedColorVideoVDP,
+    V1MTColorVideoVDP,
+)
 
 
 def run_benchmark_comparison():
