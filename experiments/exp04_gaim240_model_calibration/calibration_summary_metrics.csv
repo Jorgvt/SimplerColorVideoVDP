@@ -1,0 +1,2 @@
+Model,"Calib (a, b)",Val Pearson r,Val Spearman rho,Val RMSE,Train Pearson r,Train Spearman rho,Train RMSE,All Pearson r,All Spearman rho,All RMSE
+test_smoke,"(0.3305, 0.4215)",0.3937,0.3426,1.1236,0.5764,0.5968,0.8642,0.5187,0.5212,0.9282

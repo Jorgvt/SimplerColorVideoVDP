@@ -37,6 +37,14 @@ from simplercolorvideovdp.temporal import (
     compute_temporal_filters,
 )
 
+from simplercolorvideovdp.datasets import (
+    ALL_SCENES,
+    DEFAULT_VAL_SCENES,
+    GAIM240TorchDataset,
+    create_gaim240_dataloader,
+    read_video_ffmpeg,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -68,4 +76,11 @@ __all__ = [
     "apply_temporal_filtering",
     "MetricPooling",
     "metric_to_jod",
+    # Datasets
+    "GAIM240TorchDataset",
+    "create_gaim240_dataloader",
+    "read_video_ffmpeg",
+    "ALL_SCENES",
+    "DEFAULT_VAL_SCENES",
 ]
+
