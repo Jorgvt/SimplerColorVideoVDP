@@ -1,10 +1,10 @@
 """V1-MT Cortical Motion Processing Stage with Steerable Pyramid Subbands."""
 
-from .metric_v1_mt import V1MTColorVideoVDP
-from .mt import (
+from simplercolorvideovdp import (
     MTNormalization,
     SteerableMTIntegration,
     SteerableMTStage,
+    V1MTColorVideoVDP,
     compute_steerable_velocity_plane_weights,
 )
 
