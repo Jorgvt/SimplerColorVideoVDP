@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from simplercolorvideovdp.colorspace import linear_rgb_to_dkl
 from simplercolorvideovdp.csf import CastleCSF
@@ -498,8 +499,11 @@ class V1MTColorVideoVDP(nn.Module):
         q_per_ch = torch.empty((b, all_ch, t, num_bands), dtype=torch.float32, device=device)
         omega_lookup = (0.0, 5.0)
 
-        v1_test_subbands = []
-        v1_ref_subbands = []
+        mt_test_linear = None
+        mt_ref_linear = None
+        if not is_image and all_ch == 4:
+            mt_test_linear = torch.zeros((b, mt_stage.num_mt_channels, t, h, w), dtype=torch.float32, device=device)
+            mt_ref_linear = torch.zeros((b, mt_stage.num_mt_channels, t, h, w), dtype=torch.float32, device=device)
 
         for bb in range(num_bands):
             is_baseband = bb == (num_bands - 1)
@@ -527,22 +531,20 @@ class V1MTColorVideoVDP(nn.Module):
 
             if k_dim > 1:
                 q_band = lp_norm(q_spatial_k, 2.0, dim=-1, normalize=True, keepdim=False)
-                if not is_image and all_ch == 4:
+                if not is_image and all_ch == 4 and mt_test_linear is not None and mt_ref_linear is not None:
                     v1_test_scale = torch.cat([t_f[:, 0:1], t_f[:, 3:4]], dim=1) * torch.cat([s[:, 0:1], s[:, 3:4]], dim=1)
                     v1_ref_scale = torch.cat([r_f[:, 0:1], r_f[:, 3:4]], dim=1) * torch.cat([s[:, 0:1], s[:, 3:4]], dim=1)
-                    v1_test_subbands.append(v1_test_scale.permute(0, 3, 1, 2, 4, 5).reshape(b, -1, t, h, w))
-                    v1_ref_subbands.append(v1_ref_scale.permute(0, 3, 1, 2, 4, 5).reshape(b, -1, t, h, w))
+
+                    mt_test_linear.add_(mt_stage.integration.forward_scale(v1_test_scale, scale_idx=bb, target_size=(h, w)))
+                    mt_ref_linear.add_(mt_stage.integration.forward_scale(v1_ref_scale, scale_idx=bb, target_size=(h, w)))
             else:
                 q_band = q_spatial_k.squeeze(-1)
 
             q_per_ch[:, :, :, bb] = q_band
 
-        if not is_image and len(v1_test_subbands) > 0:
-            v1_test_stacked = torch.cat(v1_test_subbands, dim=1)
-            v1_ref_stacked = torch.cat(v1_ref_subbands, dim=1)
-
-            mt_test = mt_stage(v1_test_stacked)
-            mt_ref = mt_stage(v1_ref_stacked)
+        if not is_image and mt_test_linear is not None and mt_ref_linear is not None:
+            mt_test = mt_stage.normalization(mt_test_linear)
+            mt_ref = mt_stage.normalization(mt_ref_linear)
 
             mt_diff = torch.abs(mt_test - mt_ref)
             q_mt_spatial = lp_norm(mt_diff, self.pooling.beta, dim=(-2, -1), normalize=True)

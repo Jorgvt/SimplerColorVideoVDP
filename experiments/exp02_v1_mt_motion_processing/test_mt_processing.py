@@ -3,6 +3,7 @@
 import math
 import pytest
 import torch
+import torch.nn.functional as F
 
 from simplercolorvideovdp import (
     SteerableMTIntegration,
@@ -68,10 +69,17 @@ def test_steerable_mt_aperture_plaid():
     subbands = []
     for bb in range(pyr.num_levels):
         b_bb = b_bands[bb]
+        h_bb, w_bb = b_bb.shape[-2], b_bb.shape[-1]
         sust_ach = b_bb[:, 0:1, ...]
         trans_ach = b_bb[:, 3:4, ...]
-        scale_sub = torch.cat([sust_ach, trans_ach], dim=1).permute(0, 3, 1, 2, 4, 5).reshape(1, -1, t_len, h, w)
-        subbands.append(scale_sub)
+        scale_sub = torch.cat([sust_ach, trans_ach], dim=1)
+        if (h_bb, w_bb) != (h, w):
+            flat = scale_sub.permute(0, 3, 1, 2, 4, 5).reshape(-1, 1, h_bb, w_bb)
+            up = F.interpolate(flat, size=(h, w), mode="bilinear", align_corners=False)
+            scale_sub_reshaped = up.view(1, -1, t_len, h, w)
+        else:
+            scale_sub_reshaped = scale_sub.permute(0, 3, 1, 2, 4, 5).reshape(1, -1, t_len, h, w)
+        subbands.append(scale_sub_reshaped)
 
     stacked_v1 = torch.cat(subbands, dim=1)
 

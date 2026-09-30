@@ -18,13 +18,15 @@ def test_steerable_pyramid_decomposition_shapes():
     assert len(bands) == pyr.band_count
     assert len(log_bkg) == pyr.band_count
 
-    # Intermediate bands: K=4 orientations
+    # Intermediate bands: K=4 orientations with octave downsampling
     for level in range(pyr.num_levels):
-        assert bands[level].shape == (b, c, t, 4, h, w)
-        assert log_bkg[level].shape == (b, 2, t, h, w)
+        h_l, w_l = pyr.level_sizes[level]
+        assert bands[level].shape == (b, c, t, 4, h_l, w_l)
+        assert log_bkg[level].shape == (b, 2, t, h_l, w_l)
 
-    # Baseband: K=1 isotropic orientation
-    assert bands[-1].shape == (b, c, t, 1, h, w)
+    # Baseband: K=1 isotropic orientation at base resolution
+    h_base, w_base = pyr.base_size
+    assert bands[-1].shape == (b, c, t, 1, h_base, w_base)
     assert log_bkg[-1].shape == (b, 2, t, 1, 1)
 
 

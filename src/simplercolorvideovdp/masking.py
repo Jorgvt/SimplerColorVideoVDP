@@ -101,6 +101,21 @@ class ContrastMasking(nn.Module):
         if is_baseband:
             return torch.abs(t - r) * s
 
+        t_dim = t.shape[2]
+        if t_dim > 16 and (t.shape[-2] * t.shape[-1] >= 128 * 128):
+            d_out = torch.empty_like(t)
+            slice_size = 15
+            for t_start in range(0, t_dim, slice_size):
+                t_end = min(t_start + slice_size, t_dim)
+                s_sub = s[:, :, t_start:t_end] if s.shape[2] > 1 else s
+                d_out[:, :, t_start:t_end] = self.forward(
+                    t[:, :, t_start:t_end],
+                    r[:, :, t_start:t_end],
+                    s_sub,
+                    is_baseband=is_baseband,
+                )
+            return d_out
+
         num_ch = t.shape[1]
         gain = self.ch_gain[:num_ch].view(1, num_ch, 1, 1, 1)
 
@@ -217,6 +232,21 @@ class OrientedContrastMasking(nn.Module):
         """
         if is_baseband:
             return torch.abs(t - r) * s
+
+        t_dim = t.shape[2]
+        if t_dim > 16 and (t.shape[-2] * t.shape[-1] >= 128 * 128):
+            d_out = torch.empty_like(t)
+            slice_size = 15
+            for t_start in range(0, t_dim, slice_size):
+                t_end = min(t_start + slice_size, t_dim)
+                s_sub = s[:, :, t_start:t_end] if s.shape[2] > 1 else s
+                d_out[:, :, t_start:t_end] = self.forward(
+                    t[:, :, t_start:t_end],
+                    r[:, :, t_start:t_end],
+                    s_sub,
+                    is_baseband=is_baseband,
+                )
+            return d_out
 
         num_ch = t.shape[1]
         k_dim = t.shape[3]

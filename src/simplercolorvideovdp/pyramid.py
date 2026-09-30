@@ -154,9 +154,9 @@ class WeberLaplacianPyramid(nn.Module):
 # =========================================================================
 
 def _get_polar_grid(h: int, w: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Generates normalized radial frequency (r in [0, pi]) and angular (theta in [-pi, pi]) grids."""
+    """Generates normalized radial frequency (r in [0, pi]) and angular (theta in [-pi, pi]) grids for rfft2."""
     y_freq = torch.fft.fftfreq(h, d=1.0, device=device) * (2.0 * math.pi)
-    x_freq = torch.fft.fftfreq(w, d=1.0, device=device) * (2.0 * math.pi)
+    x_freq = torch.fft.rfftfreq(w, d=1.0, device=device) * (2.0 * math.pi)
 
     y_grid, x_grid = torch.meshgrid(y_freq, x_freq, indexing="ij")
     r = torch.sqrt(x_grid**2 + y_grid**2)
@@ -203,11 +203,11 @@ def _orientation_filter(theta: torch.Tensor, theta_k: float, num_orientations: i
 
 
 class SteerableWeberPyramid(nn.Module):
-    """Multi-scale, multi-orientation steerable Weber contrast pyramid.
+    """Multi-scale, multi-orientation steerable Weber contrast pyramid with octave downsampling.
 
-    Decomposes an input tensor into spatial frequency bands, each containing
-    K orientation subbands (e.g., K=4 for 0°, 45°, 90°, 135°), plus a low-frequency
-    baseband, normalized by background luminance to form Weber contrast.
+    Decomposes an input tensor into spatial frequency bands, each downsampled by 2x
+    at each octave, containing K orientation subbands (e.g., K=4 for 0°, 45°, 90°, 135°),
+    plus a low-frequency baseband, normalized by background luminance to form Weber contrast.
     """
 
     def __init__(
@@ -238,26 +238,33 @@ class SteerableWeberPyramid(nn.Module):
         self.band_freqs = np.array([1.0] + [0.3228 * (2.0 ** (-f)) for f in range(self.num_levels)]) * (self.ppd / 2.0)
         self.orientations = [k * math.pi / self.num_orientations for k in range(self.num_orientations)]
 
+        # Spatial sizes for all levels
+        self.level_sizes = []
+        cur_h, cur_w = height, width
+        for _ in range(self.num_levels):
+            self.level_sizes.append((cur_h, cur_w))
+            cur_h = max(1, cur_h // 2)
+            cur_w = max(1, cur_w // 2)
+        self.base_size = (cur_h, cur_w)
+
         self._build_filters()
 
     def _build_filters(self):
-        """Constructs and registers frequency-domain filter buffers."""
-        r, theta = _get_polar_grid(self.height, self.width, device=torch.device("cpu"))
-        h0, b_rad, l0 = _steerable_radial_filters(r)
+        """Constructs and registers frequency-domain filter buffers for each scale."""
+        for level, (h_l, w_l) in enumerate(self.level_sizes):
+            r, theta = _get_polar_grid(h_l, w_l, device=torch.device("cpu"))
+            h0, b_rad, l0 = _steerable_radial_filters(r)
 
-        self.register_buffer("filter_h0", h0)
-        self.register_buffer("filter_l0", l0)
-
-        for level in range(self.num_levels):
-            r_level = r * (2.0**level)
-            _, b_level, l_level = _steerable_radial_filters(r_level)
+            if level == 0:
+                self.register_buffer("filter_h0", h0)
+                self.register_buffer("filter_l0", l0)
 
             for ori_idx, theta_k in enumerate(self.orientations):
                 g_k = _orientation_filter(theta, theta_k, self.num_orientations)
-                band_k = b_level * g_k
+                band_k = b_rad * g_k
                 self.register_buffer(f"filter_band_s{level}_o{ori_idx}", band_k)
 
-            self.register_buffer(f"filter_lowpass_s{level}", l_level)
+            self.register_buffer(f"filter_lowpass_s{level}", l0)
 
     @property
     def band_count(self) -> int:
@@ -267,68 +274,88 @@ class SteerableWeberPyramid(nn.Module):
         return self.band_freqs.copy()
 
     def decompose(
-        self, r: torch.Tensor
+        self, r: torch.Tensor, slice_size: int = 15
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-        """Decomposes interleaved tensor R into Weber contrast oriented subbands.
+        """Decomposes interleaved tensor R into Weber contrast oriented subbands with octave downsampling.
 
         Args:
             r: Tensor of shape (B, 2*C, T, H, W) containing interleaved test/ref channels.
+            slice_size: Number of time frames to process per spatial FFT batch to minimize VRAM.
 
         Returns:
             lpyr: List of contrast subband tensors:
-                  - Intermediate scales (i = 0..num_levels-1): Shape (B, 2*C, T, K, H, W)
-                  - Baseband (i = num_levels): Shape (B, 2*C, T, 1, H, W)
+                  - Intermediate scales (i = 0..num_levels-1): Shape (B, 2*C, T, K, H_i, W_i)
+                  - Baseband (i = num_levels): Shape (B, 2*C, T, 1, H_base, W_base)
             log_l_bkg_pyr: List of log10 background luminance tensors.
         """
         b, c_all, t, h, w = r.shape
         device = r.device
 
-        x_flat = r.reshape(-1, h, w)
-        x_fft = torch.fft.fft2(x_flat)
-
         lpyr = []
         log_l_bkg_pyr = []
 
-        l0_filter = getattr(self, "filter_l0").to(device)
-        curr_l_fft = x_fft * l0_filter
+        curr_spatial = r
 
         for level in range(self.num_levels):
-            oriented_bands = []
-            for ori_idx in range(self.num_orientations):
-                band_filter = getattr(self, f"filter_band_s{level}_o{ori_idx}").to(device)
-                subband_fft = curr_l_fft * band_filter
-                subband_spatial = torch.fft.ifft2(subband_fft).real.view(b, c_all, t, h, w)
-                oriented_bands.append(subband_spatial)
-
-            scale_oriented = torch.stack(oriented_bands, dim=3)
+            h_l, w_l = self.level_sizes[level]
 
             l_filter = getattr(self, f"filter_lowpass_s{level}").to(device)
-            next_l_fft = curr_l_fft * l_filter
-            lowpass_spatial = torch.fft.ifft2(next_l_fft).real.view(b, c_all, t, h, w)
+            if level == 0:
+                l0_filter = getattr(self, "filter_l0").to(device)
 
-            l_bkg = torch.clamp(lowpass_spatial[..., 0:2, :, :, :], min=0.01)
-            l_bkg_expanded = l_bkg.unsqueeze(3)
+            contrast = torch.empty((b, c_all, t, self.num_orientations, h_l, w_l), dtype=r.dtype, device=device)
+            lowpass_spatial = torch.empty((b, c_all, t, h_l, w_l), dtype=r.dtype, device=device)
 
-            contrast = torch.empty_like(scale_oriented)
-            contrast[..., 0::2, :, :, :, :] = torch.clamp(
-                scale_oriented[..., 0::2, :, :, :, :] / l_bkg_expanded[..., 0:1, :, :, :, :],
-                max=1000.0,
-            )
-            contrast[..., 1::2, :, :, :, :] = torch.clamp(
-                scale_oriented[..., 1::2, :, :, :, :] / l_bkg_expanded[..., 1:2, :, :, :, :],
-                max=1000.0,
-            )
+            # Process in temporal slices to keep peak VRAM bounded
+            eff_slice = slice_size if (t > slice_size and h_l * w_l >= 128 * 128) else t
+            for t_start in range(0, t, eff_slice):
+                t_end = min(t_start + eff_slice, t)
+                sub_spatial = curr_spatial[:, :, t_start:t_end, :, :]
+                curr_flat = sub_spatial.reshape(-1, h_l, w_l)
+                curr_fft = torch.fft.rfft2(curr_flat)
+
+                if level == 0:
+                    curr_fft = curr_fft * l0_filter
+
+                next_l_fft = curr_fft * l_filter
+                lp_sp = torch.fft.irfft2(next_l_fft, s=(h_l, w_l)).view(b, c_all, t_end - t_start, h_l, w_l)
+                lowpass_spatial[:, :, t_start:t_end, :, :] = lp_sp
+
+                l_bkg = torch.clamp(lp_sp[..., 0:2, :, :, :], min=0.01)
+                l_bkg_0 = l_bkg[..., 0:1, :, :, :]
+                l_bkg_1 = l_bkg[..., 1:2, :, :, :]
+
+                for ori_idx in range(self.num_orientations):
+                    band_filter = getattr(self, f"filter_band_s{level}_o{ori_idx}").to(device)
+                    subband_fft = curr_fft * band_filter
+                    subband_spatial = torch.fft.irfft2(subband_fft, s=(h_l, w_l)).view(b, c_all, t_end - t_start, h_l, w_l)
+
+                    contrast[:, 0::2, t_start:t_end, ori_idx, :, :] = torch.clamp(
+                        subband_spatial[:, 0::2] / l_bkg_0, min=-1000.0, max=1000.0
+                    )
+                    contrast[:, 1::2, t_start:t_end, ori_idx, :, :] = torch.clamp(
+                        subband_spatial[:, 1::2] / l_bkg_1, min=-1000.0, max=1000.0
+                    )
 
             band_mul = 1.0 if level == 0 else 2.0
-            contrast = contrast * band_mul
+            contrast.mul_(band_mul)
 
             lpyr.append(contrast)
-            log_l_bkg_pyr.append(torch.log10(l_bkg))
+            log_l_bkg_pyr.append(torch.log10(torch.clamp(lowpass_spatial[..., 0:2, :, :, :], min=0.01)))
 
-            curr_l_fft = next_l_fft
+            # Downsample lowpass for next level
+            next_h, next_w = (
+                self.level_sizes[level + 1]
+                if level < self.num_levels - 1
+                else self.base_size
+            )
+            curr_flat_lp = lowpass_spatial.reshape(-1, 1, h_l, w_l)
+            downsampled = F.interpolate(curr_flat_lp, size=(next_h, next_w), mode="area")
+            curr_spatial = downsampled.view(b, c_all, t, next_h, next_w)
 
         # Baseband (isotropic residual)
-        baseband_spatial = torch.fft.ifft2(curr_l_fft).real.view(b, c_all, t, h, w)
+        h_base, w_base = self.base_size
+        baseband_spatial = curr_spatial
         l_bkg_base = torch.clamp(baseband_spatial[..., 0:2, :, :, :], min=0.01)
         l_bkg_base_mean = torch.mean(l_bkg_base, dim=[-1, -2], keepdim=True)
 

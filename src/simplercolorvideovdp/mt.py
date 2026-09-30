@@ -1,7 +1,7 @@
 """Middle Temporal (MT / V5) visual motion processing stage in SimplerColorVideoVDP."""
 
 import math
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -110,18 +110,112 @@ class SteerableMTIntegration(nn.Module):
     def num_mt_channels(self) -> int:
         return len(self.mt_directions) * len(self.mt_speeds)
 
-    def forward(self, v1_subbands: torch.Tensor) -> torch.Tensor:
+    @property
+    def n_v1_per_scale(self) -> int:
+        return len(self.orientations) * len(self.temp_freqs)
+
+    def forward_scale(
+        self,
+        v1_scale: torch.Tensor,
+        scale_idx: int,
+        target_size: Optional[Tuple[int, int]] = None,
+        slice_size: int = 15,
+    ) -> torch.Tensor:
+        """Projects a single scale's V1 steerable subbands onto MT velocity channels.
+
+        Args:
+            v1_scale: Tensor of shape (B, 2, T, K, H_s, W_s) or (B, N_v1_per_scale, T, H_s, W_s).
+            scale_idx: Integer index of the spatial scale.
+            target_size: Optional (H, W) to upsample subbands to if multi-scale downsampled.
+            slice_size: Temporal batch size to keep VRAM minimal.
+
+        Returns:
+            mt_scale_linear: (B, N_mt_channels, T, H_out, W_out)
+        """
+        device = v1_scale.device
+        if v1_scale.dim() == 6:
+            # (B, 2, T, K, H, W) -> (B, 2*K, T, H, W)
+            b, n_tf, t, k_dim, h_s, w_s = v1_scale.shape
+            v1_in = v1_scale.permute(0, 3, 1, 2, 4, 5).reshape(b, k_dim * n_tf, t, h_s, w_s)
+        else:
+            b, _, t, h_s, w_s = v1_scale.shape
+            v1_in = v1_scale
+
+        h_in, w_in = int(v1_in.shape[-2]), int(v1_in.shape[-1])
+        h_out, w_out = (int(target_size[0]), int(target_size[1])) if target_size is not None else (h_in, w_in)
+        n_v1_scale = v1_in.shape[1]
+
+        # Extract weights for this specific scale
+        start_idx = scale_idx * self.n_v1_per_scale
+        end_idx = start_idx + n_v1_scale
+        scale_weight_matrix = self.weights[start_idx:end_idx, :].to(device)
+
+        kh, kw = self.spatial_pool_size
+        ph, pw = (kh - 1) // 2, (kw - 1) // 2
+
+        mt_out = torch.empty((b, self.num_mt_channels, t, h_out, w_out), dtype=v1_scale.dtype, device=device)
+
+        eff_slice = slice_size if (t > slice_size and h_out * w_out >= 128 * 128) else t
+        for t_start in range(0, t, eff_slice):
+            t_end = min(t_start + eff_slice, t)
+            t_len = t_end - t_start
+            sub_t = v1_in[:, :, t_start:t_end, :, :]
+
+            if (h_in != h_out) or (w_in != w_out):
+                flat_sub = sub_t.permute(0, 2, 1, 3, 4).reshape(b * t_len * n_v1_scale, 1, h_in, w_in)
+                sub_up = F.interpolate(flat_sub, size=(h_out, w_out), mode="bilinear", align_corners=False)
+                sub_flat = sub_up.view(b * n_v1_scale * t_len, 1, h_out, w_out)
+            else:
+                sub_flat = sub_t.reshape(b * n_v1_scale * t_len, 1, h_out, w_out)
+
+            if ph > 0 or pw > 0:
+                padded = F.pad(sub_flat, (pw, pw, ph, ph), mode="replicate")
+                pooled = F.avg_pool2d(padded, kernel_size=(kh, kw), stride=1, padding=0)
+            else:
+                pooled = sub_flat
+
+            pooled_v1 = pooled.view(b, n_v1_scale, t_len, h_out, w_out)
+            pooled_perm = pooled_v1.permute(0, 2, 3, 4, 1)
+            mt_linear_slice = torch.matmul(pooled_perm, scale_weight_matrix).permute(0, 4, 1, 2, 3)
+            mt_out[:, :, t_start:t_end, :, :] = mt_linear_slice
+
+        return mt_out
+
+    def forward(self, v1_subbands: torch.Tensor, slice_size: int = 15) -> torch.Tensor:
         """Projects stacked V1 steerable subbands onto MT velocity channels.
 
         Args:
             v1_subbands: (B, N_v1_total, T, H, W)
+            slice_size: Temporal batch size.
 
         Returns:
             mt_linear: (B, N_mt_channels, T, H, W)
         """
         b, n_v1, t, h, w = v1_subbands.shape
+        device = v1_subbands.device
         kh, kw = self.spatial_pool_size
         ph, pw = (kh - 1) // 2, (kw - 1) // 2
+        w_mat = self.weights.to(device)
+
+        if t > slice_size and (h * w >= 128 * 128):
+            mt_out = torch.empty((b, self.num_mt_channels, t, h, w), dtype=v1_subbands.dtype, device=device)
+            for t_start in range(0, t, slice_size):
+                t_end = min(t_start + slice_size, t)
+                t_len = t_end - t_start
+                sub_t = v1_subbands[:, :, t_start:t_end, :, :]
+                sub_flat = sub_t.reshape(b * n_v1 * t_len, 1, h, w)
+
+                if ph > 0 or pw > 0:
+                    padded = F.pad(sub_flat, (pw, pw, ph, ph), mode="replicate")
+                    pooled = F.avg_pool2d(padded, kernel_size=(kh, kw), stride=1, padding=0)
+                else:
+                    pooled = sub_flat
+
+                pooled_v1 = pooled.view(b, n_v1, t_len, h, w)
+                pooled_perm = pooled_v1.permute(0, 2, 3, 4, 1)
+                mt_linear_slice = torch.matmul(pooled_perm, w_mat).permute(0, 4, 1, 2, 3)
+                mt_out[:, :, t_start:t_end, :, :] = mt_linear_slice
+            return mt_out
 
         sub_flat = v1_subbands.reshape(b * n_v1 * t, 1, h, w)
         if ph > 0 or pw > 0:
@@ -132,7 +226,7 @@ class SteerableMTIntegration(nn.Module):
 
         pooled_v1 = pooled.view(b, n_v1, t, h, w)
         pooled_perm = pooled_v1.permute(0, 2, 3, 4, 1)
-        mt_linear = torch.matmul(pooled_perm, self.weights.to(v1_subbands.device))
+        mt_linear = torch.matmul(pooled_perm, w_mat)
 
         return mt_linear.permute(0, 4, 1, 2, 3)
 
@@ -186,6 +280,10 @@ class SteerableMTStage(nn.Module):
             subtract_mean=subtract_mean,
         )
         self.normalization = MTNormalization(sigma=sigma_norm)
+
+    @property
+    def num_mt_channels(self) -> int:
+        return self.integration.num_mt_channels
 
     def decode_velocity_flow(self, mt_norm: torch.Tensor) -> torch.Tensor:
         """Decodes 2D velocity flow field (vx, vy in deg/s) via population vector readout."""
