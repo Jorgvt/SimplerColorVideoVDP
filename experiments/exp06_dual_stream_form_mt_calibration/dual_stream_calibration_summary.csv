@@ -1,0 +1,5 @@
+Model Configuration,Parameters,Train r,Train rho,Train RMSE,Val r,Val rho,Val RMSE,All r,All rho,All RMSE
+Baseline ColorVideoVDP (Isotropic),"a=0.1867, b=0.5373",0.5742,0.5942,0.8654,0.5121,0.4886,1.0576,0.5429,0.5464,0.9116
+Oriented Form Stream Only (beta_ori=0.50),"a=0.1052, b=0.6462",0.4793,0.4743,0.9275,0.4426,0.4137,1.1233,0.4431,0.4355,0.9744
+"Dual-Stream (Grid Best: beta=3.0, w=10000)","a=0.1047, b=0.6472",0.4795,0.4752,0.9274,0.4427,0.4158,1.1235,0.4432,0.4363,0.9744
+"Dual-Stream (Opt: beta=3.10, w=100000.0)","a=0.1019, b=0.6524",0.4799,0.475,0.9271,0.4429,0.4135,1.1244,0.4432,0.4355,0.9744

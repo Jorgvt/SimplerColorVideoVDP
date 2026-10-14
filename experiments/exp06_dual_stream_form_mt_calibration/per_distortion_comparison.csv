@@ -1,0 +1,9 @@
+Distortion Type,Baseline (Isotropic),Form Only (beta=0.5),Dual-Stream (Form+MT)
+dlss_rr,0.3115,0.2761,0.2754
+judder,0.3069,0.377,0.3799
+motion_noise,0.0073,-0.0052,0.0034
+motion_resolution,0.822,0.7781,0.7769
+noise_colors,0.8035,0.7034,0.7121
+restir,0.5928,0.5198,0.5218
+stutter,0.647,0.5406,0.5449
+temporal-resolution-multiplexing,0.5135,0.3821,0.3824

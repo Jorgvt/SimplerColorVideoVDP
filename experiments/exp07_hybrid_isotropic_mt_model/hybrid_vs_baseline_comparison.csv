@@ -1,0 +1,5 @@
+Model Architecture,Parameters,Train r,Train rho,Train RMSE,Val r,Val rho,Val RMSE,All r,All rho,All RMSE
+Baseline ColorVideoVDP (Isotropic Laplacian),"a=0.1867, b=0.5373",0.5742,0.5942,0.8654,0.5121,0.4886,1.0576,0.5429,0.5464,0.9116
+"Hybrid Model (Isotropic + MT, w=500)","a=0.1612, b=0.5694",0.5716,0.5904,0.8672,0.5211,0.4912,1.0574,0.5415,0.5436,0.9129
+"Hybrid Model (Isotropic + MT, w=1000)","a=0.1442, b=0.5931",0.5694,0.585,0.8689,0.5244,0.4907,1.0588,0.5395,0.5403,0.9145
+"Hybrid Model (Isotropic + MT, w=2000)","a=0.1211, b=0.6290",0.5653,0.5766,0.8718,0.527,0.5074,1.0624,0.5354,0.5334,0.9175

@@ -2,7 +2,7 @@
 
 import pytest
 import torch
-import pycvvdp
+pycvvdp = pytest.importorskip("pycvvdp")
 from simplercolorvideovdp import ColorVideoVDP
 
 

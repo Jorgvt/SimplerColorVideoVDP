@@ -1,0 +1,9 @@
+Distortion Type,Baseline (Isotropic),Hybrid (w=500),Hybrid (w=1000),Hybrid (w=2000)
+dlss_rr,0.3115,0.3173,0.3208,0.3246
+judder,0.3069,0.3177,0.3266,0.3406
+motion_noise,0.0073,0.047,0.059,0.0689
+motion_resolution,0.822,0.8217,0.8214,0.8207
+noise_colors,0.8035,0.8044,0.8016,0.7944
+restir,0.5928,0.5869,0.5824,0.5756
+stutter,0.647,0.6573,0.6623,0.668
+temporal-resolution-multiplexing,0.5135,0.4909,0.4748,0.4528

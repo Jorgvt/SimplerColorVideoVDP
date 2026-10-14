@@ -104,12 +104,8 @@ class MetricPooling(nn.Module):
         """Spatial pooling over H and W dimensions (L_beta norm, normalized)."""
         return lp_norm(d, self.beta, dim=(-2, -1), normalize=True, keepdim=False)
 
-    def pool_all_and_to_jod(self, q_per_ch: torch.Tensor, is_image: bool) -> torch.Tensor:
-        """Pools quality tensor Q_per_ch (B, C, T, num_bands) across bands, channels, and time.
-
-        Returns:
-            JOD quality scores of shape (B,) or scalar if B=1.
-        """
+    def pool_raw_q(self, q_per_ch: torch.Tensor, is_image: bool = False) -> torch.Tensor:
+        """Pools quality tensor Q_per_ch across spatial bands, channels, and time to uncalibrated Q."""
         num_ch = q_per_ch.shape[1]
         num_bands = q_per_ch.shape[3]
 
@@ -132,7 +128,9 @@ class MetricPooling(nn.Module):
         else:
             q = lp_norm(q_tc, self.beta_t, dim=1, normalize=True, keepdim=False)
 
-        q = q.squeeze(-1) if (q.dim() > 1 and q.shape[-1] == 1) else q
-        q_jod = metric_to_jod(q, self.jod_a.item(), self.jod_exp.item())
+        return q.squeeze(-1) if (q.dim() > 1 and q.shape[-1] == 1) else q
 
-        return q_jod
+    def pool_all_and_to_jod(self, q_per_ch: torch.Tensor, is_image: bool = False) -> torch.Tensor:
+        """Pools quality tensor Q_per_ch (B, C, T, num_bands) and converts to JOD quality scores."""
+        q = self.pool_raw_q(q_per_ch, is_image=is_image)
+        return metric_to_jod(q, self.jod_a.item(), self.jod_exp.item())

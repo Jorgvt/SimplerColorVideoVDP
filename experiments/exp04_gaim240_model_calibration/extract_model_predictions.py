@@ -110,29 +110,23 @@ def compute_model_quality_in_chunks(
 
     total_frames = test_t.shape[2]
 
-    # Filter impulse response length (0.25s)
-    pad_len = int(np.ceil(0.250 * fps / 2.0) * 2)
+    # Filter impulse response length (0.0625s = ~15 frames at 240fps)
+    pad_len = min(15, max(4, int(np.ceil(0.0625 * fps))))
 
     # If sequence fits in single chunk without extreme memory, run direct forward pass
     if total_frames <= chunk_size:
         test_chunk = test_t.to(device)
         ref_chunk = ref_t.to(device)
         q_jod, stats = model(test_chunk, ref_chunk, fps=fps, return_stats=True)
-        q_per_ch = torch.tensor(stats["Q_per_ch"], device=device)
-        
-        # Calculate pooled uncalibrated Q
-        per_ch_w = model.pooling.ch_weights[:q_per_ch.shape[1]].view(1, -1, 1, 1)
-        per_sband_w = torch.ones((1, q_per_ch.shape[1], 1, q_per_ch.shape[3]), device=device)
-        per_sband_w[:, :, 0, -1] = model.pooling.baseband_weight[:q_per_ch.shape[1]]
-        
-        q_sc = lp_norm(q_per_ch * per_ch_w * per_sband_w, model.pooling.beta_sch, dim=3, normalize=False)
-        q_tc = lp_norm(q_sc, model.pooling.beta_tch, dim=1, normalize=False)
-        raw_q = lp_norm(q_tc, model.pooling.beta_t, dim=1, normalize=True).squeeze().item()
-        jod_val = q_jod.squeeze().item() if isinstance(q_jod, torch.Tensor) else float(q_jod)
-        return float(raw_q), float(jod_val)
+        raw_q_form = float(stats.get("raw_q_form", stats.get("raw_q_total", 0.0)))
+        raw_q_motion = float(stats.get("raw_q_motion", 0.0))
+        raw_q_total = float(stats.get("raw_q_total", raw_q_form))
+        jod_val = float(q_jod.squeeze().item() if isinstance(q_jod, torch.Tensor) else float(q_jod))
+        return float(raw_q_total), float(raw_q_form), float(raw_q_motion), float(jod_val)
 
     # Chunked temporal processing for long videos
     q_per_ch_list = []
+    q_motion_list = []
     num_chunks = int(np.ceil(total_frames / chunk_size))
 
     for c_idx in range(num_chunks):
@@ -151,27 +145,47 @@ def compute_model_quality_in_chunks(
             # Slice out the valid frames (excluding the prepend padding)
             offset = start_f - pad_start
             valid_len = end_f - start_f
-            q_valid = q_chunk[:, :, offset : offset + valid_len, :]
+            q_valid = q_chunk[:, :, offset : offset + valid_len, :].clone()
             q_per_ch_list.append(q_valid)
 
-    # Concatenate across time dimension
+            if "raw_q_motion" in stats:
+                q_motion_list.append(float(stats["raw_q_motion"]))
+
+        del test_sub, ref_sub, stats, q_chunk
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    # Concatenate form stream across time dimension
     q_per_ch_full = torch.cat(q_per_ch_list, dim=2)  # (1, C, total_frames, bands)
 
-    # Pool across channels, bands, and time
-    num_ch = q_per_ch_full.shape[1]
-    num_bands = q_per_ch_full.shape[3]
-    per_ch_w = model.pooling.ch_weights[:num_ch].view(1, num_ch, 1, 1)
-    per_sband_w = torch.ones((1, num_ch, 1, num_bands), device=device)
-    per_sband_w[:, :, 0, -1] = model.pooling.baseband_weight[:num_ch]
+    # Pool form stream across channels, bands, and time
+    raw_q_form = float(model.pooling.pool_raw_q(q_per_ch_full, is_image=False).squeeze().item())
 
-    q_sc = lp_norm(q_per_ch_full * per_ch_w * per_sband_w, model.pooling.beta_sch, dim=3, normalize=False)
-    q_tc = lp_norm(q_sc, model.pooling.beta_tch, dim=1, normalize=False)
-    raw_q = lp_norm(q_tc, model.pooling.beta_t, dim=1, normalize=True).squeeze().item()
+    # Pool motion stream across chunks
+    if len(q_motion_list) > 0 and hasattr(model, "motion_weight"):
+        beta_t = float(model.pooling.beta_t.item())
+        stream_beta = getattr(model, "stream_beta", 4.0)
+        motion_weight = getattr(model, "motion_weight", 0.2)
 
-    jod_tensor = metric_to_jod(torch.tensor([raw_q], device=device), model.pooling.jod_a.item(), model.pooling.jod_exp.item())
-    jod_val = jod_tensor.item()
+        # Average energy across temporal chunks
+        mot_energies = [max(1e-8, q) ** beta_t for q in q_motion_list]
+        raw_q_motion = float((np.mean(mot_energies)) ** (1.0 / beta_t))
+        raw_q_total = float(
+            (max(1e-8, raw_q_form) ** stream_beta + motion_weight * (max(1e-8, raw_q_motion) ** stream_beta))
+            ** (1.0 / stream_beta)
+        )
+    else:
+        raw_q_motion = 0.0
+        raw_q_total = raw_q_form
 
-    return float(raw_q), float(jod_val)
+    jod_tensor = metric_to_jod(
+        torch.tensor([raw_q_total], device=device),
+        model.pooling.jod_a.item(),
+        model.pooling.jod_exp.item(),
+    )
+    jod_val = float(jod_tensor.item())
+
+    return float(raw_q_total), float(raw_q_form), float(raw_q_motion), float(jod_val)
 
 
 def main():
@@ -322,7 +336,7 @@ def main():
 
         t0 = time.perf_counter()
         with torch.no_grad():
-            raw_q, default_jod = compute_model_quality_in_chunks(
+            raw_q_total, raw_q_form, raw_q_motion, default_jod = compute_model_quality_in_chunks(
                 model=model,
                 test_tensor=dist_tensor,
                 ref_tensor=ref_tensor,
@@ -340,7 +354,9 @@ def main():
             "dist_vid_path": meta["dist_vid_path"],
             "ref_vid_path": meta["ref_vid_path"],
             "jod_gt": jod_gt,
-            "raw_q": raw_q,
+            "raw_q": raw_q_total,
+            "raw_q_form": raw_q_form,
+            "raw_q_motion": raw_q_motion,
             "default_jod": default_jod,
             "eval_time_sec": round(dt, 3),
         }
@@ -354,7 +370,7 @@ def main():
         pbar.set_postfix({
             "scene": meta["scene_name"][:6],
             "dist": meta["distortion_type"][:8],
-            "Q": f"{raw_q:.3f}",
+            "Q": f"{raw_q_total:.3f}",
             "JOD": f"{default_jod:.2f}",
         })
 

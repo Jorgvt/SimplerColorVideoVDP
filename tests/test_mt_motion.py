@@ -48,3 +48,18 @@ def test_v1_mt_metric_end_to_end():
 
     assert test_vid.grad is not None
     assert not torch.isnan(test_vid.grad).any()
+
+
+def test_steerable_mt_multi_speed():
+    scale_freqs = [0.5, 1.0, 2.0, 4.0]
+    orientations = [0.0, math.pi / 4, math.pi / 2, 3 * math.pi / 4]
+    mt_stage = SteerableMTStage(
+        scale_freqs=scale_freqs,
+        orientations=orientations,
+        temp_freqs=(5.0,),
+        mt_directions=(0.0, math.pi / 2),
+        mt_speeds=(1.0, 4.0, 16.0),
+    )
+    # 2 directions * 3 speeds = 6 MT channels
+    assert mt_stage.num_mt_channels == 6
+

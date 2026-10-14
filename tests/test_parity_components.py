@@ -4,8 +4,7 @@ import pytest
 import torch
 import numpy as np
 
-# Original modules
-import pycvvdp
+pycvvdp = pytest.importorskip("pycvvdp")
 from pycvvdp.display_model import vvdp_display_photometry, vvdp_display_geometry
 from pycvvdp.lpyr_dec import weber_contrast_pyr
 from pycvvdp.csf import castleCSF

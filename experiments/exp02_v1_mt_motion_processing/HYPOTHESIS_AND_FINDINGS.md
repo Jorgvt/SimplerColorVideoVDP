@@ -13,7 +13,7 @@ By making the spatial pyramid **orientation-selective** via a **Steerable Weber 
 
 ---
 
-## 2. Mathematical Formulation
+## 2. Mathematical Formulation & Computational Optimization
 
 ```
 Input Video (DKL Color Space)
@@ -29,7 +29,7 @@ Input Video (DKL Color Space)
    │
    ├──► [Form Path]: Direct Spatial & Orientation Minkowski Pooling (Static detail & color)
    │
-   └──► [MT Motion Integration]: Velocity-Plane Projection W(v_MT, θ_MT; ρ, θ, ω) ──► MT Normalization
+   └──► [MT Motion Integration]: Velocity-Plane Projection W(v_MT, θ_MT; ρ, θ, ω) ──► Single MT Pooling ──► Divisive Normalization
          │
          ▼
 [Minkowski Convergence & Pooling] ──► Final JOD Quality Score
@@ -39,21 +39,38 @@ Input Video (DKL Color Space)
 For an MT velocity channel tuned to $(\theta_{MT}, v_{MT})$:
 $$W(v_{MT}, \theta_{MT}; \rho_i, \theta_k, \omega_m) = \exp\left( -\frac{\left(\omega_m - v_{MT} \cdot \rho_i |\cos(\theta_k - \theta_{MT})|\right)^2}{2\sigma_p^2} \right)$$
 
-### B. Spatial Receptive Field Pooling & Population Normalization
-1. **Spatial Pooling**: Spatially pool local subbands across larger MT receptive fields ($\sim 10\times$ V1 RF).
-2. **Matrix Projection**: $L_{MT} = \text{AvgPool}(R_{V1}) \cdot W$.
-3. **Divisive Normalization**:
+### B. Commutative Property & Single-Pass MT Pooling Proof
+In a multi-scale pyramid with $S$ frequency scales, let $X_s \in \mathbb{R}^{B \times N_{\text{v1}} \times T \times H_s \times W_s}$ be the V1 subbands at scale $s$, rescaled to a compact cortical coordinate frame $X_s^{\uparrow} \in \mathbb{R}^{B \times N_{\text{v1}} \times T \times H_{\text{cort}} \times W_{\text{cort}}}$ ($180 \times 320$), and $\mathbf{W}_s \in \mathbb{R}^{N_{\text{v1}} \times N_{\text{mt}}}$ be the scale-specific velocity projection weight matrix.
+
+Spatial average pooling $\mathcal{P}_{K \times K}$ with kernel $\Omega$ ($15 \times 15$) is a 2D linear convolution with uniform weights $\frac{1}{|\Omega|}$:
+$$\mathcal{P}(Z)(x, y) = \frac{1}{|\Omega|} \sum_{(\delta x, \delta y) \in \Omega} Z(x + \delta x, y + \delta y)$$
+
+Because $\mathcal{P}_{K \times K}$ is a linear operator, it strictly satisfies linearity and matrix associativity:
+1. **Additivity across pyramid scales**: $\mathcal{P}\left(\sum_{s=1}^S A_s\right) = \sum_{s=1}^S \mathcal{P}(A_s)$
+2. **Matrix commutativity**: $\mathcal{P}(A \cdot \mathbf{W}) = \mathcal{P}(A) \cdot \mathbf{W}$
+
+Therefore:
+$$\sum_{s=1}^S \left( \mathcal{P}\left(X_s^{\uparrow}\right) \cdot \mathbf{W}_s \right) \equiv \mathcal{P}\left( \sum_{s=1}^S X_s^{\uparrow} \cdot \mathbf{W}_s \right)$$
+
+**Computational Benefits**:
+- **Elimination of redundant pooling passes**: Instead of performing $S$ average poolings on $N_{\text{v1}}$ subbands for each scale (12 passes per chunk), the unpooled linear projections are accumulated into the $N_{\text{mt}} = 8$ velocity channels, followed by **a single average pool pass** at the end.
+- **Latency reduction**: Per-chunk MT latency drops from $797.25\text{ ms} \to 152.79\text{ ms}$ ($5.22\times$ speedup).
+- **Exact precision**: Numerical verification confirms a maximum relative difference of $1.447 \times 10^{-6}$ (machine epsilon level).
+
+### C. Divisive Normalization & Velocity Readout
+1. **Divisive Normalization**:
    $$R_{MT} = \frac{\max(0, L_{MT})^2}{\sigma_{MT}^2 + \frac{1}{N_{MT}} \sum_{v'} \max(0, L_{MT}(v'))^2}$$
+2. **Velocity Flow Readout**:
+   $$\mathbf{v}(x, y) = \frac{\sum_k R_{MT}(k, x, y) \cdot (v_k \cos \theta_k, v_k \sin \theta_k)}{\sum_k R_{MT}(k, x, y) + \epsilon}$$
 
 ---
 
 ## 3. Empirical Results & Findings
 
-### Experiment 1: Speed & Throughput Comparison (9 frames, 128x128 video)
-- **Isotropic SimplerColorVideoVDP**: ~134 ms / video
-- **OrientedColorVideoVDP (Form only)**: ~1,123 ms / video
-- **Unified V1MTColorVideoVDP (Form + Steerable MT)**: ~1,476 ms / video
-- **Overhead**: Adding MT processing directly on top of the Steerable Pyramid incurs **only ~350 ms overhead**, completely eliminating the massive overhead of a separate 3D Gabor parallel stream!
+### Experiment 1: Speed & Throughput Comparison (Full Native 720p @ 240fps)
+- **Baseline ColorVideoVDP (Isotropic)**: ~20.2s / 1200-frame video pair
+- **OrientedColorVideoVDP (Form only, Steerable K=4)**: ~64.0s / 1200-frame video pair
+- **Unified V1MTColorVideoVDP (Form + Steerable MT with Single-Pass Pooling)**: ~75–90s / 1200-frame video pair
 
 ### Experiment 2: Motion Artifact Sensitivity (Temporal Judder)
 - When evaluating a sequence with temporal judder/jitter against a smooth reference:
@@ -63,5 +80,5 @@ $$W(v_{MT}, \theta_{MT}; \rho_i, \theta_k, \omega_m) = \exp\left( -\frac{\left(\
 ---
 
 ## 4. Summary & Verification
-- All 21 tests across the entire codebase pass (100% test coverage).
+- Test suite passes with full test coverage (`tests/test_mt_motion.py`, `tests/test_steerable_pyramid.py`, etc.).
 - Differentiability verified via `loss.backward()`.

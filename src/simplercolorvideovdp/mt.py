@@ -67,7 +67,7 @@ class SteerableMTIntegration(nn.Module):
         self,
         scale_freqs: Sequence[float],
         orientations: Sequence[float],
-        temp_freqs: Sequence[float] = (0.0, 5.0),
+        temp_freqs: Sequence[float] = (5.0,),
         mt_directions: Sequence[float] = (
             0.0,
             math.pi / 4,
@@ -114,23 +114,58 @@ class SteerableMTIntegration(nn.Module):
     def n_v1_per_scale(self) -> int:
         return len(self.orientations) * len(self.temp_freqs)
 
-    def forward_scale(
+    def pool_spatial(self, mt_unpooled: torch.Tensor, slice_size: int = 15) -> torch.Tensor:
+        """Applies spatial average pooling over MT receptive fields across all velocity channels.
+
+        Args:
+            mt_unpooled: (B, N_mt_channels, T, H, W) unpooled linear MT tensor.
+            slice_size: Temporal batch size to keep VRAM low during convolution.
+
+        Returns:
+            mt_pooled: (B, N_mt_channels, T, H, W) spatially pooled MT tensor.
+        """
+        b, n_mt, t, h, w = mt_unpooled.shape
+        kh, kw = self.spatial_pool_size
+        ph, pw = (kh - 1) // 2, (kw - 1) // 2
+        if ph <= 0 and pw <= 0:
+            return mt_unpooled
+
+        device = mt_unpooled.device
+        if t > slice_size and (h * w >= 128 * 128):
+            mt_pooled = torch.empty_like(mt_unpooled)
+            for t_start in range(0, t, slice_size):
+                t_end = min(t_start + slice_size, t)
+                t_len = t_end - t_start
+                sub_t = mt_unpooled[:, :, t_start:t_end, :, :]
+                sub_flat = sub_t.reshape(b * n_mt * t_len, 1, h, w)
+                padded = F.pad(sub_flat, (pw, pw, ph, ph), mode="replicate")
+                pooled = F.avg_pool2d(padded, kernel_size=(kh, kw), stride=1, padding=0)
+                mt_pooled[:, :, t_start:t_end, :, :] = pooled.view(b, n_mt, t_len, h, w)
+            return mt_pooled
+
+        sub_flat = mt_unpooled.reshape(b * n_mt * t, 1, h, w)
+        padded = F.pad(sub_flat, (pw, pw, ph, ph), mode="replicate")
+        pooled = F.avg_pool2d(padded, kernel_size=(kh, kw), stride=1, padding=0)
+        return pooled.view(b, n_mt, t, h, w)
+
+    def project_scale(
         self,
         v1_scale: torch.Tensor,
         scale_idx: int,
         target_size: Optional[Tuple[int, int]] = None,
-        slice_size: int = 15,
     ) -> torch.Tensor:
-        """Projects a single scale's V1 steerable subbands onto MT velocity channels.
+        """Projects a single scale's V1 steerable subbands onto MT velocity channels without pooling.
+
+        Performs linear projection at the scale's native resolution and interpolates
+        directly to the common cortical grid target_size.
 
         Args:
             v1_scale: Tensor of shape (B, 2, T, K, H_s, W_s) or (B, N_v1_per_scale, T, H_s, W_s).
             scale_idx: Integer index of the spatial scale.
-            target_size: Optional (H, W) to upsample subbands to if multi-scale downsampled.
-            slice_size: Temporal batch size to keep VRAM minimal.
+            target_size: Optional (H, W) to upsample MT projection to.
 
         Returns:
-            mt_scale_linear: (B, N_mt_channels, T, H_out, W_out)
+            mt_scale_unpooled: (B, N_mt_channels, T, H_out, W_out)
         """
         device = v1_scale.device
         if v1_scale.dim() == 6:
@@ -150,36 +185,30 @@ class SteerableMTIntegration(nn.Module):
         end_idx = start_idx + n_v1_scale
         scale_weight_matrix = self.weights[start_idx:end_idx, :].to(device)
 
-        kh, kw = self.spatial_pool_size
-        ph, pw = (kh - 1) // 2, (kw - 1) // 2
+        # 1. Linear projection at scale's native size
+        v1_perm = v1_in.permute(0, 2, 3, 4, 1)  # (B, T, H_s, W_s, N_v1_scale)
+        proj_scale = torch.matmul(v1_perm, scale_weight_matrix).permute(0, 4, 1, 2, 3)  # (B, N_mt, T, H_s, W_s)
 
-        mt_out = torch.empty((b, self.num_mt_channels, t, h_out, w_out), dtype=v1_scale.dtype, device=device)
+        # 2. Rescale projection to cortical grid (target_size)
+        if (h_in != h_out) or (w_in != w_out):
+            flat_proj = proj_scale.reshape(b * self.num_mt_channels * t, 1, h_in, w_in)
+            proj_up = F.interpolate(flat_proj, size=(h_out, w_out), mode="bilinear", align_corners=False)
+            mt_scale_unpooled = proj_up.view(b, self.num_mt_channels, t, h_out, w_out)
+        else:
+            mt_scale_unpooled = proj_scale
 
-        eff_slice = slice_size if (t > slice_size and h_out * w_out >= 128 * 128) else t
-        for t_start in range(0, t, eff_slice):
-            t_end = min(t_start + eff_slice, t)
-            t_len = t_end - t_start
-            sub_t = v1_in[:, :, t_start:t_end, :, :]
+        return mt_scale_unpooled
 
-            if (h_in != h_out) or (w_in != w_out):
-                flat_sub = sub_t.permute(0, 2, 1, 3, 4).reshape(b * t_len * n_v1_scale, 1, h_in, w_in)
-                sub_up = F.interpolate(flat_sub, size=(h_out, w_out), mode="bilinear", align_corners=False)
-                sub_flat = sub_up.view(b * n_v1_scale * t_len, 1, h_out, w_out)
-            else:
-                sub_flat = sub_t.reshape(b * n_v1_scale * t_len, 1, h_out, w_out)
-
-            if ph > 0 or pw > 0:
-                padded = F.pad(sub_flat, (pw, pw, ph, ph), mode="replicate")
-                pooled = F.avg_pool2d(padded, kernel_size=(kh, kw), stride=1, padding=0)
-            else:
-                pooled = sub_flat
-
-            pooled_v1 = pooled.view(b, n_v1_scale, t_len, h_out, w_out)
-            pooled_perm = pooled_v1.permute(0, 2, 3, 4, 1)
-            mt_linear_slice = torch.matmul(pooled_perm, scale_weight_matrix).permute(0, 4, 1, 2, 3)
-            mt_out[:, :, t_start:t_end, :, :] = mt_linear_slice
-
-        return mt_out
+    def forward_scale(
+        self,
+        v1_scale: torch.Tensor,
+        scale_idx: int,
+        target_size: Optional[Tuple[int, int]] = None,
+        slice_size: int = 15,
+    ) -> torch.Tensor:
+        """Projects and pools a single scale's V1 subbands."""
+        mt_unpooled = self.project_scale(v1_scale, scale_idx=scale_idx, target_size=target_size)
+        return self.pool_spatial(mt_unpooled, slice_size=slice_size)
 
     def forward(self, v1_subbands: torch.Tensor, slice_size: int = 15) -> torch.Tensor:
         """Projects stacked V1 steerable subbands onto MT velocity channels.
@@ -193,42 +222,14 @@ class SteerableMTIntegration(nn.Module):
         """
         b, n_v1, t, h, w = v1_subbands.shape
         device = v1_subbands.device
-        kh, kw = self.spatial_pool_size
-        ph, pw = (kh - 1) // 2, (kw - 1) // 2
         w_mat = self.weights.to(device)
 
-        if t > slice_size and (h * w >= 128 * 128):
-            mt_out = torch.empty((b, self.num_mt_channels, t, h, w), dtype=v1_subbands.dtype, device=device)
-            for t_start in range(0, t, slice_size):
-                t_end = min(t_start + slice_size, t)
-                t_len = t_end - t_start
-                sub_t = v1_subbands[:, :, t_start:t_end, :, :]
-                sub_flat = sub_t.reshape(b * n_v1 * t_len, 1, h, w)
+        # 1. Linear projection across all subbands
+        v1_perm = v1_subbands.permute(0, 2, 3, 4, 1)  # (B, T, H, W, N_v1)
+        mt_unpooled = torch.matmul(v1_perm, w_mat).permute(0, 4, 1, 2, 3)  # (B, N_mt, T, H, W)
 
-                if ph > 0 or pw > 0:
-                    padded = F.pad(sub_flat, (pw, pw, ph, ph), mode="replicate")
-                    pooled = F.avg_pool2d(padded, kernel_size=(kh, kw), stride=1, padding=0)
-                else:
-                    pooled = sub_flat
-
-                pooled_v1 = pooled.view(b, n_v1, t_len, h, w)
-                pooled_perm = pooled_v1.permute(0, 2, 3, 4, 1)
-                mt_linear_slice = torch.matmul(pooled_perm, w_mat).permute(0, 4, 1, 2, 3)
-                mt_out[:, :, t_start:t_end, :, :] = mt_linear_slice
-            return mt_out
-
-        sub_flat = v1_subbands.reshape(b * n_v1 * t, 1, h, w)
-        if ph > 0 or pw > 0:
-            padded = F.pad(sub_flat, (pw, pw, ph, ph), mode="replicate")
-            pooled = F.avg_pool2d(padded, kernel_size=(kh, kw), stride=1, padding=0)
-        else:
-            pooled = sub_flat
-
-        pooled_v1 = pooled.view(b, n_v1, t, h, w)
-        pooled_perm = pooled_v1.permute(0, 2, 3, 4, 1)
-        mt_linear = torch.matmul(pooled_perm, w_mat)
-
-        return mt_linear.permute(0, 4, 1, 2, 3)
+        # 2. Single-pass spatial pooling over MT receptive fields
+        return self.pool_spatial(mt_unpooled, slice_size=slice_size)
 
 
 class MTNormalization(nn.Module):
@@ -251,7 +252,7 @@ class SteerableMTStage(nn.Module):
         self,
         scale_freqs: Sequence[float],
         orientations: Sequence[float],
-        temp_freqs: Sequence[float] = (0.0, 5.0),
+        temp_freqs: Sequence[float] = (5.0,),
         mt_directions: Sequence[float] = (
             0.0,
             math.pi / 4,

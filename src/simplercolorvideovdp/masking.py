@@ -153,6 +153,7 @@ class OrientedContrastMasking(nn.Module):
         pu_dilate: float = DEFAULT_PU_DILATE,
         cross_orientation_weight: float = 0.25,
         enable_oblique_effect: bool = True,
+        oblique_weight: float = 0.15,
     ):
         super().__init__()
         self.mask_p = mask_p
@@ -162,6 +163,7 @@ class OrientedContrastMasking(nn.Module):
         self.pu_padsize = int(pu_dilate * 2.0)
         self.cross_orientation_weight = cross_orientation_weight
         self.enable_oblique_effect = enable_oblique_effect
+        self.oblique_weight = oblique_weight
 
         self.register_buffer("mask_q", torch.tensor(mask_q, dtype=torch.float32))
 
@@ -234,9 +236,9 @@ class OrientedContrastMasking(nn.Module):
             return torch.abs(t - r) * s
 
         t_dim = t.shape[2]
-        if t_dim > 16 and (t.shape[-2] * t.shape[-1] >= 128 * 128):
+        if t_dim > 8 and (t.shape[-2] * t.shape[-1] >= 128 * 128):
             d_out = torch.empty_like(t)
-            slice_size = 15
+            slice_size = 8
             for t_start in range(0, t_dim, slice_size):
                 t_end = min(t_start + slice_size, t_dim)
                 s_sub = s[:, :, t_start:t_end] if s.shape[2] > 1 else s
@@ -254,7 +256,7 @@ class OrientedContrastMasking(nn.Module):
 
         if self.enable_oblique_effect and k_dim > 1:
             angles = torch.linspace(0, math.pi * (1 - 1 / k_dim), k_dim, device=device).view(1, 1, 1, k_dim, 1, 1)
-            oblique_factor = 1.0 - 0.15 * (torch.sin(2.0 * angles) ** 2)
+            oblique_factor = 1.0 - self.oblique_weight * (torch.sin(2.0 * angles) ** 2)
             s = s * oblique_factor
 
         gain = self.ch_gain[:num_ch].view(1, num_ch, 1, 1, 1, 1)

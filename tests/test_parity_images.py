@@ -6,7 +6,7 @@ import numpy as np
 from pathlib import Path
 from PIL import Image
 
-import pycvvdp
+pycvvdp = pytest.importorskip("pycvvdp")
 from simplercolorvideovdp import ColorVideoVDP
 
 

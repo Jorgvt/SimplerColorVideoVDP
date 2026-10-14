@@ -274,7 +274,7 @@ class SteerableWeberPyramid(nn.Module):
         return self.band_freqs.copy()
 
     def decompose(
-        self, r: torch.Tensor, slice_size: int = 15
+        self, r: torch.Tensor, slice_size: int = 8
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """Decomposes interleaved tensor R into Weber contrast oriented subbands with octave downsampling.
 
